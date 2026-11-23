@@ -105,7 +105,13 @@ class AppData(
     val programs: MutableList<Program>,
     val sessions: MutableList<Session>,
     val weights: MutableList<WeightEntry>,
-    val cardioOptions: MutableList<String>
+    val cardioOptions: MutableList<String>,
+    // Phase 2: weekly template (Mon..Sun; "p:<programId>", "cardio" or "rest"),
+    // days marked cardio done, days made rest by hand, and the day the plan started.
+    val weekPlan: MutableList<String> = defaultWeekPlan(programs),
+    val cardioDone: MutableList<String> = mutableListOf(),
+    val restDays: MutableList<String> = mutableListOf(),
+    var planStart: String = LocalDate.now().toString()
 )
 
 fun AppData.toJson(): JSONObject = JSONObject()
@@ -116,6 +122,15 @@ fun AppData.toJson(): JSONObject = JSONObject()
     .put("sessions", JSONArray().apply { sessions.forEach { put(it.toJson()) } })
     .put("weights", JSONArray().apply { weights.forEach { put(it.toJson()) } })
     .put("cardioOptions", JSONArray().apply { cardioOptions.forEach { put(it) } })
+    .put("weekPlan", JSONArray().apply { weekPlan.forEach { put(it) } })
+    .put("cardioDone", JSONArray().apply { cardioDone.forEach { put(it) } })
+    .put("restDays", JSONArray().apply { restDays.forEach { put(it) } })
+    .put("planStart", planStart)
+
+private fun strings(o: JSONObject, key: String): MutableList<String> {
+    val a = o.optJSONArray(key) ?: return mutableListOf()
+    return (0 until a.length()).map { a.getString(it) }.toMutableList()
+}
 
 // ---------- Reading and checking JSON ----------
 
@@ -186,12 +201,23 @@ fun parseData(text: String): AppData {
     if (v < 1) throw ImportError("Unknown backup format version.")
     if (v > SCHEMA_VERSION) throw ImportError("This backup was made by a newer version of Compound. Update the app first.")
     try {
-        val cardio = root.optJSONArray("cardioOptions")
+        val programs = objs(root, "programs").map { parseProgram(it) }.toMutableList()
+        val sessions = objs(root, "sessions").map { parseSession(it) }.sortedBy { it.date }.toMutableList()
+        // Files from Phase 1 have no weekly plan yet: build the default one from the programs.
+        val plan = strings(root, "weekPlan").let { if (it.size == 7) it else defaultWeekPlan(programs) }
+        val today = LocalDate.now().toString()
+        val start = root.optString("planStart", "").ifBlank {
+            listOfNotNull(sessions.minOfOrNull { it.date }, today).min()
+        }
         return AppData(
-            objs(root, "programs").map { parseProgram(it) }.toMutableList(),
-            objs(root, "sessions").map { parseSession(it) }.sortedBy { it.date }.toMutableList(),
+            programs,
+            sessions,
             objs(root, "weights").map { parseWeight(it) }.sortedBy { it.date }.toMutableList(),
-            if (cardio == null) mutableListOf() else (0 until cardio.length()).map { cardio.getString(it) }.toMutableList()
+            strings(root, "cardioOptions"),
+            plan,
+            strings(root, "cardioDone").onEach { checkDate(it) },
+            strings(root, "restDays").onEach { checkDate(it) },
+            checkDate(start)
         )
     } catch (e: ImportError) {
         throw e
@@ -261,6 +287,10 @@ fun merge(device: AppData, file: AppData, mode: MergeMode?): MergePlan {
     mergeList(device.weights, file.weights, { it.date }, { JSONObject().put("kg", it.kg) }, { it.lastModified }, mode, s)
     if (mode != null) {
         file.cardioOptions.filter { it !in device.cardioOptions }.forEach { device.cardioOptions.add(it) }
+        file.cardioDone.filter { it !in device.cardioDone }.forEach { device.cardioDone.add(it) }
+        file.restDays.filter { it !in device.restDays }.forEach { device.restDays.add(it) }
+        if (file.planStart < device.planStart) device.planStart = file.planStart
+        if (mode == MergeMode.FILE) { device.weekPlan.clear(); device.weekPlan.addAll(file.weekPlan) }
         device.sessions.sortBy { it.date }
         device.weights.sortBy { it.date }
     }

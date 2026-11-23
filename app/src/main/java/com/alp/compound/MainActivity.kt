@@ -26,6 +26,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.time.LocalDate
+import java.time.YearMonth
+import java.time.format.TextStyle
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -44,7 +46,7 @@ class MainActivity : Activity() {
     private var editingProgramId: String? = null
     private var chartRange = 1
 
-    private val tabNames = listOf("Today", "Weight", "Program", "Data")
+    private val tabNames = listOf("Home", "Weight", "Program", "Data")
     private val ranges = listOf("1M" to 30, "3M" to 90, "6M" to 180, "All" to 0)
     private val today: String get() = LocalDate.now().toString()
     private val d: AppData get() = store.data
@@ -103,12 +105,29 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------------- Today ----------------
+    // ---------------- Home ----------------
 
     private fun renderToday() {
-        label(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.ENGLISH)), 14f, secondary = true)
+        val now = LocalDate.now()
+        label(now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.ENGLISH)), 14f, secondary = true)
+        val week = d.week(mondayOf(now), now)
+        renderCalendar(week, now)
+
+        val info = week.first { it.date == now }
+        val yesterday = d.dayInfo(now.minusDays(1), now)
+        if (yesterday.status == DayStatus.MISSED && info.status != DayStatus.DONE && info.status != DayStatus.PARTIAL) {
+            notice("Yesterday was missed. Never miss twice — today gets you back on track.")
+        }
+        val (run, current) = longestRun(week, now)
+        if (run >= 4 && current) {
+            notice("$run workout days in a row this week. Recovery matters in a calorie deficit — tap a day to make it a rest day if you need one.")
+        }
+
         val s = d.sessionOn(today)
-        if (s == null) renderStart() else renderSession(s)
+        if (s != null) renderSession(s) else renderPlanned(info)
+
+        renderWeekSummary(week, now)
+        renderHistory(now)
 
         if (d.weightOn(today) == null) {
             val cd = card()
@@ -117,24 +136,76 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun renderStart() {
-        label("Today", 26f, bold = true)
-        val next = d.nextProgram()
-        if (next == null) {
-            label("No programs yet. Add one in the Program tab.", 15f, parent = card())
-            return
-        }
-        var chosen: Program = next
+    private fun notice(text: String) {
         val cd = card()
-        label("Next up", 13f, secondary = true, parent = cd)
-        val title = label(next.name, 22f, bold = true, parent = cd)
+        (cd.background as GradientDrawable).setStroke(dp(2), c(R.color.brand))
+        label(text, 14f, bold = true, parent = cd)
+    }
+
+    private fun renderPlanned(info: DayInfo) {
+        when (info.kind) {
+            DayKind.WORKOUT -> {
+                val p = d.programs.firstOrNull { it.id == info.programId } ?: return
+                val caption = if (info.shifted) "Today's workout (moved from a missed day)" else "Today's workout"
+                renderStart(p, caption) { cd ->
+                    cd.addView(button("Rest today instead", primary = false) { makeRestToday() }, full())
+                }
+            }
+            DayKind.CARDIO -> {
+                val cd = card()
+                label(if (info.shifted) "Today's cardio (moved from a missed day)" else "Today's cardio", 13f, secondary = true, parent = cd)
+                label("Cardio", 22f, bold = true, parent = cd)
+                label("${d.cardioOptions.joinToString(", ")} · 20–30 min, moderate pace", 14f, parent = cd)
+                if (info.status == DayStatus.DONE) {
+                    label("Done ✓", 16f, bold = true, parent = cd).setTextColor(c(R.color.brand))
+                    cd.addView(button("Undo", primary = false) { d.cardioDone.remove(today); store.save(); render() }, full())
+                } else {
+                    cd.addView(button("Mark cardio done") { d.cardioDone.add(today); store.save(); render() }, full(12))
+                    cd.addView(button("Rest today instead", primary = false) { makeRestToday() }, full())
+                }
+            }
+            else -> {
+                label("Rest day", 26f, bold = true)
+                val cd = card()
+                if (today in d.restDays) {
+                    label("You made today a rest day. The planned workout moved to the next day.", 14f, parent = cd)
+                    cd.addView(button("Undo rest day", primary = false) { d.restDays.remove(today); store.save(); render() }, full())
+                } else {
+                    label("Recovery is part of the plan. A walk still helps.", 14f, parent = cd)
+                }
+                if (today !in d.cardioDone) {
+                    cd.addView(button("I did cardio today", primary = false) { d.cardioDone.add(today); store.save(); render() }, full())
+                }
+                val p = d.nextProgram() ?: return
+                renderStart(p, "Train anyway?") {}
+            }
+        }
+    }
+
+    private fun makeRestToday() {
+        AlertDialog.Builder(this)
+            .setTitle("Rest today?")
+            .setMessage("Today's plan moves to the next day. A rest day you choose isn't counted as missed.")
+            .setPositiveButton("Rest today") { _, _ ->
+                if (today !in d.restDays) d.restDays.add(today)
+                store.save(); render()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun renderStart(initial: Program, caption: String, extra: (LinearLayout) -> Unit) {
+        var chosen: Program = initial
+        val cd = card()
+        label(caption, 13f, secondary = true, parent = cd)
+        val title = label(initial.name, 22f, bold = true, parent = cd)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         cd.addView(list)
         fun showList(p: Program) {
             list.removeAllViews()
             p.exercises.forEach { label("• ${it.name} — ${it.target()}", 14f, parent = list) }
         }
-        showList(next)
+        showList(initial)
 
         label("Or pick another workout:", 13f, secondary = true, parent = cd).setPadding(0, dp(12), 0, dp(4))
         val chips = LinearLayout(this)
@@ -161,6 +232,221 @@ class MainActivity : Activity() {
             store.save()
             render()
         }, full(12))
+        extra(cd)
+    }
+
+    // ---------------- Calendar ----------------
+
+    private var showMonth = false
+    private var shownMonth: YearMonth = YearMonth.now()
+    private val missColor = 0xFFC0503A.toInt()
+    private val palette = listOf(0xFF4C7BD9, 0xFFE08A3C, 0xFF8A63D2, 0xFFD0574E, 0xFF3AA6A6, 0xFFB58B2A).map { it.toInt() }
+
+    private fun renderCalendar(week: List<DayInfo>, now: LocalDate) {
+        val cd = card()
+        val head = row(cd)
+        val titleText = if (showMonth) shownMonth.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH)) else "This week"
+        label(titleText, 17f, bold = true, parent = head).layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        if (showMonth) {
+            head.addView(small("‹") { shownMonth = shownMonth.minusMonths(1); render() })
+            head.addView(small("›") { shownMonth = shownMonth.plusMonths(1); render() })
+        }
+        head.addView(small(if (showMonth) "Week" else "Month") {
+            showMonth = !showMonth
+            shownMonth = YearMonth.from(now)
+            render()
+        })
+
+        if (!showMonth) {
+            val r = row(cd)
+            week.forEach { r.addView(dayCell(it, now, letter = true), cellLp()) }
+        } else {
+            val letters = row(cd)
+            listOf("M", "T", "W", "T", "F", "S", "S").forEach {
+                val t = label(it, 12f, secondary = true, parent = letters)
+                t.gravity = Gravity.CENTER
+                t.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+            }
+            var monday = mondayOf(shownMonth.atDay(1))
+            while (!monday.isAfter(shownMonth.atEndOfMonth())) {
+                val r = row(cd)
+                d.week(monday, now).forEach { di ->
+                    if (YearMonth.from(di.date) == shownMonth) r.addView(dayCell(di, now, letter = false), cellLp())
+                    else r.addView(View(this), cellLp())
+                }
+                monday = monday.plusWeeks(1)
+            }
+        }
+        label("✓ done · ◐ partial · ✕ missed · – rest · tap a day for details", 11f, secondary = true, parent = cd)
+            .setPadding(0, dp(8), 0, 0)
+    }
+
+    private fun cellLp() = LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(2), dp(4), dp(2), dp(4)) }
+
+    private fun kindColor(di: DayInfo): Int = when (di.kind) {
+        DayKind.WORKOUT -> {
+            val i = d.programs.indexOfFirst { it.id == di.programId }
+            if (i < 0) c(R.color.text_secondary) else palette[i % palette.size]
+        }
+        DayKind.CARDIO -> c(R.color.brand)
+        else -> c(R.color.text_secondary)
+    }
+
+    private fun shortName(name: String): String =
+        name.split(" ").filter { it.isNotEmpty() }.joinToString("") { it.take(1) }.take(3).uppercase(Locale.ENGLISH)
+
+    private fun dayCell(di: DayInfo, now: LocalDate, letter: Boolean): View {
+        val v = LinearLayout(this)
+        v.orientation = LinearLayout.VERTICAL
+        v.gravity = Gravity.CENTER_HORIZONTAL
+        v.setPadding(0, dp(6), 0, dp(6))
+        val col = kindColor(di)
+        val filled = di.status == DayStatus.DONE
+        val white = 0xFFFFFFFF.toInt()
+        if (letter) {
+            val t = label(di.date.dayOfWeek.getDisplayName(TextStyle.NARROW, Locale.ENGLISH), 11f, parent = v)
+            t.setTextColor(if (filled) white else c(R.color.text_secondary))
+            t.gravity = Gravity.CENTER
+        }
+        val num = label(di.date.dayOfMonth.toString(), 15f, bold = di.date == now, parent = v)
+        num.setTextColor(if (filled) white else c(R.color.text_primary))
+        num.gravity = Gravity.CENTER
+        val markText = when (di.status) {
+            DayStatus.DONE -> "✓"
+            DayStatus.PARTIAL -> "◐"
+            DayStatus.MISSED -> "✕"
+            DayStatus.REST -> "–"
+            DayStatus.NONE -> " "
+            DayStatus.TODAY, DayStatus.UPCOMING -> if (di.kind == DayKind.CARDIO) "C" else shortName(di.label)
+        }
+        val mark = label(markText, 12f, bold = true, parent = v)
+        mark.setTextColor(when {
+            filled -> white
+            di.status == DayStatus.MISSED -> missColor
+            else -> col
+        })
+        mark.gravity = Gravity.CENTER
+
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(10).toFloat()
+        when (di.status) {
+            DayStatus.DONE -> bg.setColor(col)
+            DayStatus.PARTIAL, DayStatus.UPCOMING, DayStatus.TODAY -> bg.setStroke(dp(1), col)
+            DayStatus.MISSED -> bg.setStroke(dp(1), missColor)
+            else -> {}
+        }
+        if (di.date == now) {
+            val ring = when {
+                filled -> c(R.color.text_primary)
+                di.kind == DayKind.REST || di.kind == DayKind.NONE -> c(R.color.brand)
+                else -> col
+            }
+            bg.setStroke(dp(3), ring)
+        }
+        v.background = bg
+        if (di.status != DayStatus.NONE) v.setOnClickListener { dayDialog(di, now) }
+        return v
+    }
+
+    private fun dayDialog(di: DayInfo, now: LocalDate) {
+        val ds = di.date.toString()
+        val lines = mutableListOf<String>()
+        val s = di.session
+        when {
+            s != null -> {
+                val vol = s.sets.filter { it.done }.sumOf { (it.weight ?: 0.0) * (it.reps ?: 0) }
+                lines.add("${s.programName}: ${s.doneCount()} of ${s.sets.size} sets (${s.donePct()}%)")
+                lines.add("Volume: ${fmtNum(vol)} kg")
+                lines.add(if (di.status == DayStatus.DONE) "Counts as done." else "Under $DONE_PCT% of the plan, so it counts as partial.")
+            }
+            di.kind == DayKind.CARDIO -> {
+                lines.add("Cardio: ${d.cardioOptions.joinToString(", ")}, 20–30 min")
+                lines.add(when (di.status) {
+                    DayStatus.DONE -> "Done ✓"
+                    DayStatus.MISSED -> "Missed"
+                    else -> "Planned"
+                })
+            }
+            di.kind == DayKind.WORKOUT -> {
+                lines.add(if (di.status == DayStatus.MISSED) "${di.label} was planned and missed." else "Planned: ${di.label}")
+                d.programs.firstOrNull { it.id == di.programId }?.exercises?.forEach { lines.add("• ${it.name} — ${it.target()}") }
+            }
+            else -> lines.add(if (ds in d.restDays) "Rest day (set by you)." else "Rest day.")
+        }
+        if (di.shifted && di.status != DayStatus.MISSED) lines.add("\nMoved here from a missed day.")
+
+        val b = AlertDialog.Builder(this)
+            .setTitle(pretty(di.date))
+            .setMessage(lines.joinToString("\n"))
+            .setPositiveButton("OK", null)
+        val future = !di.date.isBefore(now)
+        when {
+            future && ds in d.restDays ->
+                b.setNeutralButton("Undo rest day") { _, _ -> d.restDays.remove(ds); store.save(); render() }
+            future && s == null && (di.kind == DayKind.WORKOUT || di.kind == DayKind.CARDIO) && di.status != DayStatus.DONE ->
+                b.setNeutralButton("Make rest day") { _, _ -> d.restDays.add(ds); store.save(); render() }
+            !future && di.kind == DayKind.CARDIO && di.status == DayStatus.MISSED ->
+                b.setNeutralButton("Mark cardio done") { _, _ -> d.cardioDone.add(ds); store.save(); render() }
+            !future && di.kind == DayKind.CARDIO && di.status == DayStatus.DONE ->
+                b.setNeutralButton("Undo cardio") { _, _ -> d.cardioDone.remove(ds); store.save(); render() }
+        }
+        b.show()
+    }
+
+    private fun renderWeekSummary(week: List<DayInfo>, now: LocalDate) {
+        val tpl = d.template()
+        val gymPlanned = tpl.count { it.startsWith("p:") }
+        val cardioPlanned = tpl.count { it == "cardio" }
+        val workouts = week.filter { it.kind == DayKind.WORKOUT }
+        val done = workouts.count { it.status == DayStatus.DONE }
+        val partial = workouts.count { it.status == DayStatus.PARTIAL }
+        val missed = workouts.count { it.status == DayStatus.MISSED }
+        val cardio = week.count { it.date.toString() in d.cardioDone }
+
+        val cd = card()
+        label("This week", 13f, secondary = true, parent = cd)
+        val cardioText = if (cardioPlanned > 0) " · $cardio/$cardioPlanned cardio" else ""
+        label("$done/$gymPlanned gym$cardioText", 24f, bold = true, parent = cd)
+        val extra = listOfNotNull(
+            if (partial > 0) "$partial partial" else null,
+            if (missed > 0) "$missed missed" else null
+        )
+        if (extra.isNotEmpty()) label(extra.joinToString(" · "), 14f, parent = cd)
+        val avg = d.avg7(now)
+        val prev = d.avg7(now.minusDays(7))
+        if (avg != null) {
+            val vs = if (prev != null) " · ${signed(avg - prev)} kg vs last week" else ""
+            label("Weight: avg ${fmtKg(avg)} kg$vs", 14f, parent = cd)
+        }
+    }
+
+    private fun renderHistory(now: LocalDate) {
+        val weeks = d.allWeeks(now)
+        if (weeks.isEmpty()) return
+        val cd = card()
+        label("Consistency", 17f, bold = true, parent = cd)
+        fun pct(v: Int?) = if (v == null) "—" else "$v%"
+        label("Last 4 weeks: ${pct(consistency(weeks.takeLast(4)))} · All time: ${pct(consistency(weeks))}", 14f, parent = cd)
+        label("Done workouts ÷ workouts that were due. Partial and missed count as not done.", 11f, secondary = true, parent = cd)
+
+        val shown = weeks.takeLast(8)
+        val planned = d.template().count { it.startsWith("p:") }
+        val max = maxOf(planned, shown.maxOf { it.done }, 1)
+        val bars = LinearLayout(this)
+        cd.addView(bars, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+        val fmt = DateTimeFormatter.ofPattern("d/M", Locale.ENGLISH)
+        for (w in shown) {
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.gravity = Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+            label("${w.done}", 12f, parent = col).gravity = Gravity.CENTER
+            val bar = View(this)
+            bar.background = GradientDrawable().apply { setColor(c(R.color.brand)); cornerRadius = dp(4).toFloat() }
+            col.addView(bar, LinearLayout.LayoutParams(dp(18), maxOf(dp(2), dp(90) * w.done / max)))
+            label(w.monday.format(fmt), 10f, secondary = true, parent = col).gravity = Gravity.CENTER
+            bars.addView(col, LinearLayout.LayoutParams(0, dp(130), 1f))
+        }
+        label("Gym days done per week (date = Monday)", 11f, secondary = true, parent = cd)
     }
 
     private fun renderSession(s: Session) {
@@ -336,7 +622,7 @@ class MainActivity : Activity() {
         if (editing != null) { renderProgramEditor(editing); return }
 
         label("Program", 26f, bold = true)
-        label("Workouts rotate in this order: " + d.programs.joinToString(" → ") { it.name }, 13f, secondary = true)
+        label("Your workouts. The weekly plan below decides which day each one is on.", 13f, secondary = true)
 
         d.programs.forEachIndexed { i, p ->
             val cd = card()
@@ -348,10 +634,24 @@ class MainActivity : Activity() {
             p.exercises.forEach { label("${it.name} — ${it.target()}", 13f, parent = cd).setPadding(0, dp(3), 0, dp(3)) }
         }
 
+        val wc = card()
+        label("Weekly plan", 17f, bold = true, parent = wc)
+        label("Weeks start on Monday. A missed workout moves to the next day, filling rest days first. Anything that doesn't fit by Sunday stays missed.",
+            12f, secondary = true, parent = wc)
+        val tpl = d.template()
+        listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday").forEachIndexed { i, name ->
+            val r = row(wc)
+            r.setPadding(0, dp(8), 0, dp(8))
+            label(name, 15f, parent = r).layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+            label(d.tokenName(tpl[i]), 15f, bold = true, parent = r).setTextColor(c(R.color.brand))
+            r.setOnClickListener { pickPlanDay(i, name) }
+        }
+        label("Tap a day to change it.", 12f, secondary = true, parent = wc)
+
         val cc = card()
         label("Cardio", 17f, bold = true, parent = cc)
         label("${d.cardioOptions.joinToString(", ")} · 20–30 min, moderate pace", 14f, parent = cc)
-        label("Cardio logging comes in a later update.", 12f, secondary = true, parent = cc)
+        label("Mark cardio as done from Home. Minutes and effort come in a later update.", 12f, secondary = true, parent = cc)
 
         val ac = card()
         ac.addView(button("Add program", primary = false) {
@@ -379,6 +679,21 @@ class MainActivity : Activity() {
             cm.setPrimaryClip(ClipData.newPlainText("Compound programs", arr.toString(2)))
             toast("Copied. Paste it to Claude to review or improve.")
         }, full())
+    }
+
+    private fun pickPlanDay(i: Int, dayName: String) {
+        val tokens = d.programs.map { "p:" + it.id } + listOf("cardio", "rest")
+        val names = tokens.map { d.tokenName(it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(dayName)
+            .setItems(names) { _, which ->
+                while (d.weekPlan.size < 7) d.weekPlan.add("rest")
+                d.weekPlan[i] = tokens[which]
+                store.save()
+                render()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun renderProgramEditor(p: Program) {
