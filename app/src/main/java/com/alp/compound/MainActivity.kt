@@ -496,7 +496,6 @@ class MainActivity : Activity() {
         cd.addView(button("Share backup (Quick Share, Claude…)", primary = false) {
             val i = Intent(Intent.ACTION_SEND)
                 .setType("text/plain")
-                .putExtra(Intent.EXTRA_SUBJECT, "Compound backup $today")
                 .putExtra(Intent.EXTRA_TEXT, store.json())
             try {
                 startActivity(Intent.createChooser(i, "Share backup"))
@@ -563,9 +562,31 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             alert("Can't import", "This file couldn't be read."); return
         }
+        // A device with no logs yet (e.g. a fresh tablet install) only has the starting program,
+        // so the backup replaces it instead of adding a second copy of every workout.
+        if (store.data.sessions.isEmpty() && store.data.weights.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Import this backup?")
+                .setMessage("This device has no logs yet, so its data will be replaced by the backup " +
+                    "(${file.weights.size} weight entries, ${file.sessions.size} workouts, ${file.programs.size} programs).")
+                .setPositiveButton("Import") { _, _ ->
+                    try {
+                        store.safetyBackup()
+                        store.data = file
+                        store.save()
+                        render()
+                        toast("Imported")
+                    } catch (e: Exception) {
+                        alert("Import failed", e.message ?: "Unknown problem")
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
         val plan = merge(store.data, file, null)
         if (plan.added == 0 && plan.changed == 0) {
-            alert("Nothing to import", "Everything in this file is already on this device.")
+            alert("Backup is valid", "Everything in this backup is already on this device, so nothing needed to change.")
             return
         }
         var msg = "New entries: ${plan.added}\nDifferent from this device: ${plan.changed}\nAlready the same: ${plan.same}"

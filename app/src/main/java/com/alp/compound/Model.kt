@@ -174,7 +174,11 @@ private fun parseWeight(o: JSONObject): WeightEntry {
 
 /** Reads a full data/backup file. Throws ImportError with a plain message if anything is wrong. */
 fun parseData(text: String): AppData {
-    val root = try { JSONObject(text.trim()) } catch (e: Exception) {
+    // Pasted text may carry extra words around the JSON (e.g. a share title), so read from the first { to the last }.
+    val start = text.indexOf('{')
+    val end = text.lastIndexOf('}')
+    if (start < 0 || end <= start) throw ImportError("No backup data found in this text.")
+    val root = try { JSONObject(text.substring(start, end + 1)) } catch (e: Exception) {
         throw ImportError("This isn't valid JSON, so it can't be a Compound backup.")
     }
     if (!root.has("schemaVersion")) throw ImportError("This doesn't look like a Compound backup (no schemaVersion).")
@@ -198,7 +202,12 @@ fun parseData(text: String): AppData {
 
 /** Accepts one program object, a list of programs, or {"programs": [...]} — handy for AI-made programs. */
 fun parseProgramsLoose(text: String): List<Program> {
-    val t = text.trim()
+    // Skip any words before the JSON starts (and after it ends).
+    val first = listOf(text.indexOf('{'), text.indexOf('[')).filter { it >= 0 }.minOrNull()
+        ?: throw ImportError("No program JSON found in this text.")
+    val last = maxOf(text.lastIndexOf('}'), text.lastIndexOf(']'))
+    if (last <= first) throw ImportError("No program JSON found in this text.")
+    val t = text.substring(first, last + 1)
     try {
         val list: List<JSONObject> = when {
             t.startsWith("[") -> JSONArray(t).let { a -> (0 until a.length()).map { a.getJSONObject(it) } }
