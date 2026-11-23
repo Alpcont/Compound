@@ -5,4 +5,6 @@
     <color name="text_primary">#23302B</color>
     <color name="text_secondary">#6B756F</color>
     <color name="brand">#2F8364</color>
+    <color name="on_brand">#FFFFFF</color>
+    <color name="tab_bar">#EBE6DD</color>
 </resources>

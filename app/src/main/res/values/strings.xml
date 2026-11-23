@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">MyApp</string>
-    <string name="placeholder">Template is working. Ask Claude to build your app.</string>
+    <string name="app_name">Compound</string>
 </resources>

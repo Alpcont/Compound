@@ -1,20 +1,26 @@
-# Android app template
+# Compound
 
-Starting point for Alp's small personal Android apps. Built entirely on GitHub —
-no Android Studio or terminal needed. Every push builds an APK and publishes it as a release.
+A personal Android gym tracker built around one idea: small gains, repeated, add up. It holds my
+4-day upper/lower program, lets me tick off each set during a workout (weight and reps are filled in
+from last time), logs my body weight once a day with a 7-day moving average chart, and exports or
+imports everything as one JSON file for backups, moving data to my tablet, or sending to Claude for analysis.
 
-## Start a new app
-1. Click **Use this template → Create a new repository** and name it (e.g. `water-tracker`).
-2. Open the new repo with Claude and describe the app. Claude first renames the template
-   (app name, package) following `CLAUDE.md`, then builds the app.
-3. Install the APK from the repo's **Releases** page on your phone:
-   `https://github.com/Alpcont/<repo>/releases/latest/download/<AppName>.apk`
+**Download the newest version:** https://github.com/Alpcont/compound/releases/latest/download/Compound.apk
 
-## What's inside
-- `CLAUDE.md` — rules Claude follows in every app (read automatically).
-- `.github/workflows/build.yml` — builds, verifies and publishes the APK on every push.
-- `app/` — a minimal Kotlin app (one screen, light/dark theme, placeholder icon).
-- `app/debug.keystore` — fixed signing key, so updates install over the previous version.
+## Phone setup
+- Open the link above on the phone, download `Compound.apk`, and allow "Install unknown apps" for your browser or Files app when asked.
+- New versions install over the old one; your data is kept.
+- Make a backup now and then from the **Data** tab (Save backup file). Data lives only on the device.
+- To see your data on the tablet: Save backup file (or Share → Quick Share) on the phone, then **Import** on the tablet.
 
-## Phone setup (once)
-Allow installing apps from your browser / file manager when Android asks.
+## What's in this version (Phase 1)
+- **Today:** shows the next workout in the rotation (Upper A → Lower A → Upper B → Lower B), or pick another. One row per set with kg, reps and a tick box.
+- **Weight:** daily log, 7-day average, change vs 7 and 30 days ago and since the start (kg and %), chart with 1M / 3M / 6M / All, editable history.
+- **Program:** edit programs and exercises, reorder them, paste a program as JSON, copy all programs as JSON.
+- **Data:** save/share a full JSON backup, import a file or pasted text (checked first, preview, choose which version wins on conflicts, automatic safety copy, undo last import).
+
+## Ideas for later (from the build spec)
+- Phase 2: calendar home screen, done/partial/missed days (70% rule), weekly gym counter, shift-forward rules, "never miss twice" highlight.
+- Phase 3: all progress charts (estimated 1RM per exercise, volume, cardio minutes, gym days per week), cardio logging (treadmill, bike, elliptical), 1 kg milestones, speed-limit warning, waist log, CSV export.
+- Phase 4: workout notes shown next time, developer notes with "Export for Claude", rest timer, +2.5 kg overload hints, Atomic Habits page, streaks, daily checkboxes, reminders.
+- Phase 5: tablet dashboard layout, then Firebase sync.

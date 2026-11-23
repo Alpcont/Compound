@@ -4,15 +4,15 @@ plugins {
 }
 
 android {
-    namespace = "com.alp.template"
+    namespace = "com.alp.compound"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.alp.template"
+        applicationId = "com.alp.compound"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "0.1.0"
     }
 
     // Fixed key so every new APK installs as an update over the previous one.
