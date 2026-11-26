@@ -35,6 +35,7 @@ private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 private const val REQ_EXPORT = 1
 private const val REQ_IMPORT = 2
+private const val REQ_CSV = 3
 
 class MainActivity : Activity() {
     private lateinit var store: Store
@@ -45,8 +46,9 @@ class MainActivity : Activity() {
     private var tab = 0
     private var editingProgramId: String? = null
     private var chartRange = 1
+    private var progressExercise: String? = null
 
-    private val tabNames = listOf("Home", "Weight", "Program", "Data")
+    private val tabNames = listOf("Home", "Weight", "Progress", "Program", "Data")
     private val ranges = listOf("1M" to 30, "3M" to 90, "6M" to 180, "All" to 0)
     private val today: String get() = LocalDate.now().toString()
     private val d: AppData get() = store.data
@@ -77,7 +79,8 @@ class MainActivity : Activity() {
         when (tab) {
             0 -> renderToday()
             1 -> renderWeight()
-            2 -> renderProgram()
+            2 -> renderProgress()
+            3 -> renderProgram()
             else -> renderData()
         }
     }
@@ -123,6 +126,8 @@ class MainActivity : Activity() {
             notice("$run workout days in a row this week. Recovery matters in a calorie deficit — tap a day to make it a rest day if you need one.")
         }
 
+        speedNotice(recentOnly = true)
+
         val s = d.sessionOn(today)
         if (s != null) renderSession(s) else renderPlanned(info)
 
@@ -158,9 +163,10 @@ class MainActivity : Activity() {
                 label("${d.cardioOptions.joinToString(", ")} · 20–30 min, moderate pace", 14f, parent = cd)
                 if (info.status == DayStatus.DONE) {
                     label("Done ✓", 16f, bold = true, parent = cd).setTextColor(c(R.color.brand))
-                    cd.addView(button("Undo", primary = false) { d.cardioDone.remove(today); store.save(); render() }, full())
+                    d.cardioOn(today).forEach { label(it.text(), 14f, parent = cd) }
+                    cd.addView(button("Undo", primary = false) { d.clearCardio(today); store.save(); render() }, full())
                 } else {
-                    cd.addView(button("Mark cardio done") { d.cardioDone.add(today); store.save(); render() }, full(12))
+                    cd.addView(button("Log cardio") { cardioDialog(today) }, full(12))
                     cd.addView(button("Rest today instead", primary = false) { makeRestToday() }, full())
                 }
             }
@@ -174,7 +180,9 @@ class MainActivity : Activity() {
                     label("Recovery is part of the plan. A walk still helps.", 14f, parent = cd)
                 }
                 if (today !in d.cardioDone) {
-                    cd.addView(button("I did cardio today", primary = false) { d.cardioDone.add(today); store.save(); render() }, full())
+                    cd.addView(button("I did cardio today", primary = false) { cardioDialog(today) }, full())
+                } else {
+                    d.cardioOn(today).forEach { label("Cardio done ✓ " + it.text(), 14f, parent = cd) }
                 }
                 val p = d.nextProgram() ?: return
                 renderStart(p, "Train anyway?") {}
@@ -360,7 +368,9 @@ class MainActivity : Activity() {
                 lines.add(if (di.status == DayStatus.DONE) "Counts as done." else "Under $DONE_PCT% of the plan, so it counts as partial.")
             }
             di.kind == DayKind.CARDIO -> {
-                lines.add("Cardio: ${d.cardioOptions.joinToString(", ")}, 20–30 min")
+                val logged = d.cardioOn(ds)
+                if (logged.isEmpty()) lines.add("Cardio: ${d.cardioOptions.joinToString(", ")}, 20–30 min")
+                else logged.forEach { lines.add("Cardio: " + it.text()) }
                 lines.add(when (di.status) {
                     DayStatus.DONE -> "Done ✓"
                     DayStatus.MISSED -> "Missed"
@@ -386,11 +396,54 @@ class MainActivity : Activity() {
             future && s == null && (di.kind == DayKind.WORKOUT || di.kind == DayKind.CARDIO) && di.status != DayStatus.DONE ->
                 b.setNeutralButton("Make rest day") { _, _ -> d.restDays.add(ds); store.save(); render() }
             !future && di.kind == DayKind.CARDIO && di.status == DayStatus.MISSED ->
-                b.setNeutralButton("Mark cardio done") { _, _ -> d.cardioDone.add(ds); store.save(); render() }
+                b.setNeutralButton("Log cardio") { _, _ -> cardioDialog(ds) }
             !future && di.kind == DayKind.CARDIO && di.status == DayStatus.DONE ->
-                b.setNeutralButton("Undo cardio") { _, _ -> d.cardioDone.remove(ds); store.save(); render() }
+                b.setNeutralButton("Undo cardio") { _, _ -> d.clearCardio(ds); store.save(); render() }
         }
         b.show()
+    }
+
+    private fun cardioDialog(date: String) {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(8), dp(24), 0) }
+        fun choices(title: String, options: List<String>, start: String): () -> String {
+            label(title, 12f, secondary = true, parent = box).setPadding(0, dp(8), 0, dp(4))
+            var chosen = start
+            val r = LinearLayout(this)
+            val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(r) }
+            box.addView(hs)
+            val views = mutableListOf<TextView>()
+            fun style() = views.forEachIndexed { i, v -> styleChip(v, options[i] == chosen) }
+            options.forEach { o -> views.add(chip(o) { chosen = o; style() }.also { r.addView(it) }) }
+            style()
+            return { chosen }
+        }
+        val machines = d.cardioOptions.ifEmpty { mutableListOf("Cardio") }
+        val last = d.cardio.lastOrNull()
+        val machine = choices("Machine", machines, last?.machine?.takeIf { it in machines } ?: machines[0])
+        label("Minutes", 12f, secondary = true, parent = box).setPadding(0, dp(12), 0, 0)
+        val min = numberField((last?.minutes ?: 25).toString(), "minutes", decimal = false)
+        min.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        box.addView(min, full(0))
+        val effort = choices("Effort", listOf("Easy", "Moderate", "Hard"), last?.effort ?: "Moderate")
+        AlertDialog.Builder(this)
+            .setTitle("Log cardio · " + pretty(LocalDate.parse(date)))
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Save") { _, _ ->
+                val m = min.text.toString().trim().toIntOrNull()
+                if (m == null || m !in 1..600) toast("Minutes must be 1–600, nothing saved")
+                else { d.logCardio(date, machine(), m, effort()); store.save(); hideKeyboard(); render() }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun speedNotice(recentOnly: Boolean) {
+        val drop = d.weeklyDrop() ?: return
+        if (drop <= SPEED_LIMIT_KG) return
+        val last = d.weights.maxOfOrNull { it.date } ?: return
+        if (recentOnly && LocalDate.parse(last).isBefore(LocalDate.now().minusDays(7))) return
+        notice("Slow down: your 7-day average dropped ${fmtKg(drop)} kg in a week (limit ${fmtKg(SPEED_LIMIT_KG)} kg). " +
+            "Losing faster risks muscle — consider eating a little more.")
     }
 
     private fun renderWeekSummary(week: List<DayInfo>, now: LocalDate) {
@@ -535,13 +588,13 @@ class MainActivity : Activity() {
         r.addView(button("Save") {
             val kg = parseNum(input.text.toString())
             if (kg == null || kg < 20 || kg > 400) toast("Enter a weight between 20 and 400 kg")
-            else { d.setWeight(today, kg); store.save(); hideKeyboard(); render(); toast("Saved ${fmtKg(kg)} kg") }
+            else { saveWeight(today, kg); hideKeyboard(); toast("Saved ${fmtKg(kg)} kg") }
         }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) })
         label("Weigh in the morning, after the toilet, before eating or drinking — same clothes, same spot on the floor.",
             12f, secondary = true, parent = cd).setPadding(0, dp(8), 0, 0)
 
         val ws = d.weights.sortedBy { it.date }
-        if (ws.isEmpty()) return
+        if (ws.isEmpty()) { renderWaist(); return }
         val lastDate = LocalDate.parse(ws.last().date)
         val firstDate = LocalDate.parse(ws.first().date)
         val avgNow = d.avg7(lastDate) ?: ws.last().kg
@@ -558,6 +611,7 @@ class MainActivity : Activity() {
         change("vs 30 days ago", d.avg7(lastDate.minusDays(30)))
         if (firstDate != lastDate) change("Since start (${pretty(firstDate)})", ws.first().kg)
         label("${ws.size} days logged", 12f, secondary = true, parent = sc).setPadding(0, dp(6), 0, 0)
+        speedNotice(recentOnly = false)
 
         val chartCard = card()
         val chips = LinearLayout(this)
@@ -576,6 +630,8 @@ class MainActivity : Activity() {
         chartCard.addView(chart, LinearLayout.LayoutParams(MATCH, dp(240)).apply { topMargin = dp(8) })
         label("Dots: daily weight · Line: 7-day average", 12f, secondary = true, parent = chartCard)
 
+        renderMilestones()
+
         val hc = card()
         label("History", 17f, bold = true, parent = hc)
         label("Tap a day to edit or delete it.", 12f, secondary = true, parent = hc)
@@ -587,6 +643,140 @@ class MainActivity : Activity() {
             t.setPadding(0, dp(10), 0, dp(10))
             t.setOnClickListener { editWeight(w.date) }
         }
+        renderWaist()
+    }
+
+    private fun saveWeight(date: String, kg: Double) {
+        val before = d.milestones().size
+        d.setWeight(date, kg)
+        store.save()
+        render()
+        val after = d.milestones()
+        if (after.size > before) alert("Milestone! 🎉", "${after.last().first} kg down since you started (7-day average). Small gains, repeated.")
+    }
+
+    private fun renderMilestones() {
+        val ws = d.weights.sortedBy { it.date }
+        if (ws.size < 2) return
+        val ms = d.milestones()
+        val cd = card()
+        label("Milestones", 17f, bold = true, parent = cd)
+        val start = ws.first().kg
+        val avg = d.avg7(LocalDate.parse(ws.last().date)) ?: ws.last().kg
+        val next = ms.size + 1
+        val toGo = avg - (start - next)
+        label("Next: −$next kg (${fmtKg(start - next)} kg avg) · ${fmtKg(maxOf(toGo, 0.0))} kg to go", 14f, parent = cd)
+        ms.reversed().forEach { (kg, date) -> label("✓ −$kg kg · ${pretty(LocalDate.parse(date))}", 14f, parent = cd) }
+        label("Every 1 kg lost since your first weigh-in, by 7-day average.", 11f, secondary = true, parent = cd)
+    }
+
+    private fun renderWaist() {
+        val cd = card()
+        label("Waist (cm)", 17f, bold = true, parent = cd)
+        val r = row(cd)
+        val input = numberField(d.waistOn(today)?.let { fmtKg(it.cm) } ?: "", "e.g. 104.5", decimal = true)
+        input.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        r.addView(input, LinearLayout.LayoutParams(0, WRAP, 1f))
+        r.addView(button("Save") {
+            val cm = parseNum(input.text.toString())
+            if (cm == null || cm < 40 || cm > 250) toast("Enter a waist between 40 and 250 cm")
+            else { d.setWaist(today, cm); store.save(); hideKeyboard(); render(); toast("Saved ${fmtKg(cm)} cm") }
+        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) })
+        label("Measure at the navel, relaxed, after breathing out. Once a week is enough.", 12f, secondary = true, parent = cd)
+            .setPadding(0, dp(6), 0, 0)
+        val ws = d.waists
+        if (ws.size >= 2) {
+            val diff = ws.last().cm - ws.first().cm
+            label("Since start (${pretty(LocalDate.parse(ws.first().date))}): ${signed(diff)} cm", 14f, parent = cd).setPadding(0, dp(6), 0, 0)
+        }
+        for (w in ws.reversed()) {
+            val t = label("${pretty(LocalDate.parse(w.date))}   ${fmtKg(w.cm)} cm", 15f, parent = cd)
+            t.setPadding(0, dp(10), 0, dp(10))
+            t.setOnClickListener { editWaist(w) }
+        }
+    }
+
+    private fun editWaist(w: WaistEntry) {
+        val et = numberField(fmtKg(w.cm), "cm", decimal = true)
+        AlertDialog.Builder(this)
+            .setTitle(pretty(LocalDate.parse(w.date)))
+            .setView(padded(et))
+            .setPositiveButton("Save") { _, _ ->
+                val cm = parseNum(et.text.toString())
+                if (cm == null || cm < 40 || cm > 250) toast("Enter a waist between 40 and 250 cm")
+                else { d.setWaist(w.date, cm); store.save(); render() }
+            }
+            .setNeutralButton("Delete") { _, _ -> d.waists.remove(w); store.save(); render() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ---------------- Progress ----------------
+
+    private fun renderProgress() {
+        label("Progress", 26f, bold = true)
+        val now = LocalDate.now()
+
+        val oc = card()
+        label("Estimated 1RM", 17f, bold = true, parent = oc)
+        val names = d.loggedExercises()
+        if (names.isEmpty()) {
+            label("Finish a few workouts with kg and reps to see your strength trend.", 14f, parent = oc)
+        } else {
+            val sel = progressExercise?.takeIf { p -> names.any { it.equals(p, ignoreCase = true) } } ?: names[0]
+            progressExercise = sel
+            val chips = LinearLayout(this)
+            val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips) }
+            oc.addView(hs, full(8))
+            names.forEach { n ->
+                val v = chip(n) { progressExercise = n; render() }
+                styleChip(v, n == sel)
+                chips.addView(v)
+            }
+            val hist = d.oneRmHistory(sel)
+            val chart = WeightChart(this)
+            chart.points = hist
+            chart.averages = hist
+            chart.emptyText = "No sets logged yet"
+            oc.addView(chart, LinearLayout.LayoutParams(MATCH, dp(220)).apply { topMargin = dp(8) })
+            if (hist.isNotEmpty()) {
+                val best = hist.maxBy { it.second }
+                var t = "Latest ${fmtKg(hist.last().second)} kg · best ${fmtKg(best.second)} kg (${pretty(best.first)})"
+                if (hist.size > 1) t += " · ${signed(hist.last().second - hist.first().second)} kg since first"
+                label(t, 14f, parent = oc)
+            }
+            label("Best ticked set each workout: kg × (1 + reps ÷ 30).", 11f, secondary = true, parent = oc)
+        }
+
+        val mondays = d.allWeeks(now).takeLast(12)
+        if (mondays.isEmpty()) return
+        weekBars("Volume per week", mondays.map { it.monday to d.volumeBetween(it.monday, it.monday.plusDays(6)) },
+            "kg × reps of ticked sets") { v -> if (v >= 1000) fmtNum(Math.round(v / 100.0) / 10.0) + "t" else fmtNum(Math.round(v).toDouble()) }
+        weekBars("Cardio minutes per week", mondays.map { it.monday to d.cardioMinutesBetween(it.monday, it.monday.plusDays(6)).toDouble() },
+            "Logged cardio sessions") { fmtNum(it) }
+        weekBars("Gym days per week", mondays.map { it.monday to it.done.toDouble() },
+            "Workouts done (70%+ of sets)") { fmtNum(it) }
+    }
+
+    private fun weekBars(title: String, values: List<Pair<LocalDate, Double>>, note: String, fmt: (Double) -> String) {
+        val cd = card()
+        label(title, 17f, bold = true, parent = cd)
+        val max = maxOf(values.maxOf { it.second }, 1.0)
+        val bars = LinearLayout(this)
+        cd.addView(bars, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+        val df = DateTimeFormatter.ofPattern("d/M", Locale.ENGLISH)
+        for ((monday, v) in values) {
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.gravity = Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+            label(if (v > 0) fmt(v) else "", 10f, parent = col).gravity = Gravity.CENTER
+            val bar = View(this)
+            bar.background = GradientDrawable().apply { setColor(c(R.color.brand)); cornerRadius = dp(4).toFloat() }
+            col.addView(bar, LinearLayout.LayoutParams(dp(16), maxOf(dp(2), (dp(90) * v / max).toInt())))
+            label(monday.format(df), 9f, secondary = true, parent = col).gravity = Gravity.CENTER
+            bars.addView(col, LinearLayout.LayoutParams(0, dp(130), 1f))
+        }
+        label("$note · date = Monday", 11f, secondary = true, parent = cd)
     }
 
     private fun pickPastDay() {
@@ -606,7 +796,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Save") { _, _ ->
                 val kg = parseNum(et.text.toString())
                 if (kg == null || kg < 20 || kg > 400) toast("Enter a weight between 20 and 400 kg")
-                else { d.setWeight(date, kg); store.save(); render() }
+                else saveWeight(date, kg)
             }
             .setNegativeButton("Cancel", null)
         if (existing != null) b.setNeutralButton("Delete") { _, _ ->
@@ -651,7 +841,7 @@ class MainActivity : Activity() {
         val cc = card()
         label("Cardio", 17f, bold = true, parent = cc)
         label("${d.cardioOptions.joinToString(", ")} · 20–30 min, moderate pace", 14f, parent = cc)
-        label("Mark cardio as done from Home. Minutes and effort come in a later update.", 12f, secondary = true, parent = cc)
+        label("Log cardio (machine, minutes, effort) from Home. Totals are on the Progress tab.", 12f, secondary = true, parent = cc)
 
         val ac = card()
         ac.addView(button("Add program", primary = false) {
@@ -799,7 +989,8 @@ class MainActivity : Activity() {
 
         val cd = card()
         label("Backup", 17f, bold = true, parent = cd)
-        label("On this device: ${d.weights.size} weight entries, ${d.sessions.size} workouts, ${d.programs.size} programs.",
+        label("On this device: ${d.weights.size} weight entries, ${d.sessions.size} workouts, ${d.cardio.size} cardio, " +
+            "${d.waists.size} waist, ${d.programs.size} programs.",
             14f, parent = cd)
         cd.addView(button("Save backup file") {
             val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
@@ -818,6 +1009,15 @@ class MainActivity : Activity() {
                 toast("Too large to share as text. Use Save backup file instead.")
             }
         }, full())
+
+        cd.addView(button("Export CSV (spreadsheet)", primary = false) {
+            val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("text/csv")
+                .putExtra(Intent.EXTRA_TITLE, "compound-$today.csv")
+            startActivityForResult(i, REQ_CSV)
+        }, full())
+        label("CSV is for spreadsheets only; use the JSON backup to move data between devices.", 11f, secondary = true, parent = cd)
 
         val ic = card()
         label("Import", 17f, bold = true, parent = ic)
@@ -858,6 +1058,11 @@ class MainActivity : Activity() {
                     out.use { it.write(store.json().toByteArray()) }
                     toast("Backup saved")
                 }
+                REQ_CSV -> {
+                    val out = contentResolver.openOutputStream(uri) ?: throw Exception("Can't open the file")
+                    out.use { it.write(store.data.toCsv().toByteArray()) }
+                    toast("CSV saved")
+                }
                 REQ_IMPORT -> {
                     val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                         ?: throw Exception("Can't open the file")
@@ -888,6 +1093,7 @@ class MainActivity : Activity() {
                     try {
                         store.safetyBackup()
                         store.data = file
+                        store.data.dedupePrograms()
                         store.save()
                         render()
                         toast("Imported")
@@ -930,6 +1136,7 @@ class MainActivity : Activity() {
         try {
             store.safetyBackup()
             val plan = merge(store.data, file, mode)
+            store.data.dedupePrograms()
             store.save()
             render()
             toast("Imported (${plan.added} new, ${plan.changed} compared)")

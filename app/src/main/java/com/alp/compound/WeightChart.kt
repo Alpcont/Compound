@@ -14,6 +14,7 @@ import java.util.Locale
 class WeightChart(context: Context) : View(context) {
     var points: List<Pair<LocalDate, Double>> = emptyList()
     var averages: List<Pair<LocalDate, Double>> = emptyList()
+    var emptyText = "Log your weight to see the chart"
 
     private val d = resources.displayMetrics.density
     private val secondary = context.getColor(R.color.text_secondary)
@@ -36,7 +37,7 @@ class WeightChart(context: Context) : View(context) {
         super.onDraw(c)
         if (points.isEmpty()) {
             textPaint.textAlign = Paint.Align.CENTER
-            c.drawText("Log your weight to see the chart", width / 2f, height / 2f, textPaint)
+            c.drawText(emptyText, width / 2f, height / 2f, textPaint)
             return
         }
         val left = 40 * d
