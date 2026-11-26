@@ -45,6 +45,13 @@ fun AppData.template(): List<String> = (0..6).map { i ->
     if (t.startsWith("p:") && programs.none { "p:" + it.id == t }) "rest" else t
 }
 
+/** The weekly template for one week, with that week's hand-made day swaps applied in order. */
+fun AppData.templateFor(monday: LocalDate): List<String> {
+    val t = template().toMutableList()
+    for (sw in swapsIn(monday)) { val x = t[sw.a]; t[sw.a] = t[sw.b]; t[sw.b] = x }
+    return t
+}
+
 fun AppData.tokenName(token: String): String = when {
     token == "cardio" -> "Cardio"
     token.startsWith("p:") -> programs.firstOrNull { "p:" + it.id == token }?.name ?: "Rest"
@@ -52,7 +59,8 @@ fun AppData.tokenName(token: String): String = when {
 }
 
 fun AppData.week(monday: LocalDate, today: LocalDate): List<DayInfo> {
-    val tpl = template()
+    // Swaps change this week's template first; every rule below then works as before.
+    val tpl = templateFor(monday)
     val owed = tpl.filter { it != "rest" }.toMutableList()
     val start = LocalDate.parse(planStart)
     val out = mutableListOf<DayInfo>()

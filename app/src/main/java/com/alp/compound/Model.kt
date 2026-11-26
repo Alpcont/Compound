@@ -101,14 +101,24 @@ class WeightEntry(var id: String, var date: String, var kg: Double, var lastModi
         .put("id", id).put("date", date).put("kg", kg).put("lastModified", lastModified)
 }
 
-// Phase 3: one cardio session (machine, minutes, effort) and one waist measurement per day.
+// Phase 3: cardio sessions (type, minutes, effort RPE 1–10, optional km), waist (one per day),
+// day swaps per week (Monday date + two day indexes 0..6) and the weight milestones already celebrated.
 class CardioEntry(
-    var id: String, var date: String, var machine: String, var minutes: Int, var effort: String,
+    var id: String, var date: String, var type: String, var minutes: Int, var rpe: Int, var km: Double?,
     var lastModified: Long
 ) {
-    fun toJson(): JSONObject = JSONObject()
-        .put("id", id).put("date", date).put("machine", machine).put("minutes", minutes)
-        .put("effort", effort).put("lastModified", lastModified)
+    fun toJson(): JSONObject {
+        val o = JSONObject()
+            .put("id", id).put("date", date).put("type", type).put("minutes", minutes)
+            .put("rpe", rpe).put("lastModified", lastModified)
+        km?.let { o.put("km", it) }
+        return o
+    }
+}
+
+class Swap(val week: String, val a: Int, val b: Int) {
+    fun toJson(): JSONObject = JSONObject().put("week", week).put("a", a).put("b", b)
+    fun key(): String = "$week:${minOf(a, b)}:${maxOf(a, b)}"
 }
 
 class WaistEntry(var id: String, var date: String, var cm: Double, var lastModified: Long) {
@@ -128,7 +138,9 @@ class AppData(
     val restDays: MutableList<String> = mutableListOf(),
     var planStart: String = LocalDate.now().toString(),
     val cardio: MutableList<CardioEntry> = mutableListOf(),
-    val waists: MutableList<WaistEntry> = mutableListOf()
+    val waists: MutableList<WaistEntry> = mutableListOf(),
+    val swaps: MutableList<Swap> = mutableListOf(),
+    val milestonesShown: MutableList<Int> = mutableListOf()
 )
 
 fun AppData.toJson(): JSONObject = JSONObject()
@@ -145,6 +157,8 @@ fun AppData.toJson(): JSONObject = JSONObject()
     .put("planStart", planStart)
     .put("cardio", JSONArray().apply { cardio.forEach { put(it.toJson()) } })
     .put("waists", JSONArray().apply { waists.forEach { put(it.toJson()) } })
+    .put("swaps", JSONArray().apply { swaps.forEach { put(it.toJson()) } })
+    .put("milestonesShown", JSONArray().apply { milestonesShown.forEach { put(it) } })
 
 private fun strings(o: JSONObject, key: String): MutableList<String> {
     val a = o.optJSONArray(key) ?: return mutableListOf()
@@ -214,8 +228,20 @@ private fun parseCardio(o: JSONObject): CardioEntry {
     val date = checkDate(o.getString("date"))
     val min = o.getInt("minutes")
     if (min !in 1..600) throw ImportError("Cardio on $date: minutes must be 1–600.")
-    return CardioEntry(idOrNew(o), date, o.optString("machine", "Cardio"), min,
-        o.optString("effort", "Moderate"), o.optLong("lastModified", 0L))
+    // Build 5 of 0.3.0 stored "machine" and an easy/moderate/hard "effort"; read those too.
+    val oldEffort = when (o.optString("effort", "").lowercase(Locale.ENGLISH)) { "easy" -> 3; "hard" -> 8; else -> 5 }
+    val rpe = o.optInt("rpe", oldEffort).coerceIn(1, 10)
+    val km = if (o.has("km") && !o.isNull("km")) o.getDouble("km") else null
+    if (km != null && (km < 0.0 || km > 300.0)) throw ImportError("Cardio on $date: distance is out of range.")
+    return CardioEntry(idOrNew(o), date, o.optString("type", o.optString("machine", "Cardio")), min, rpe, km,
+        o.optLong("lastModified", 0L))
+}
+
+private fun parseSwap(o: JSONObject): Swap {
+    val a = o.getInt("a")
+    val b = o.getInt("b")
+    if (a !in 0..6 || b !in 0..6) throw ImportError("A day swap has a day outside Monday–Sunday.")
+    return Swap(checkDate(o.getString("week")), a, b)
 }
 
 private fun parseWaist(o: JSONObject): WaistEntry {
@@ -257,7 +283,10 @@ fun parseData(text: String): AppData {
             strings(root, "restDays").onEach { checkDate(it) },
             checkDate(start),
             optObjs(root, "cardio").map { parseCardio(it) }.sortedBy { it.date }.toMutableList(),
-            optObjs(root, "waists").map { parseWaist(it) }.sortedBy { it.date }.toMutableList()
+            optObjs(root, "waists").map { parseWaist(it) }.sortedBy { it.date }.toMutableList(),
+            optObjs(root, "swaps").map { parseSwap(it) }.toMutableList(),
+            root.optJSONArray("milestonesShown")?.let { a -> (0 until a.length()).map { a.getInt(it) } }
+                ?.toMutableList() ?: mutableListOf()
         )
     } catch (e: ImportError) {
         throw e
@@ -390,6 +419,8 @@ fun merge(device: AppData, file: AppData, mode: MergeMode?): MergePlan {
         file.restDays.filter { it !in device.restDays }.forEach { device.restDays.add(it) }
         if (file.planStart < device.planStart) device.planStart = file.planStart
         if (mode == MergeMode.FILE) { device.weekPlan.clear(); device.weekPlan.addAll(file.weekPlan) }
+        file.swaps.filter { f -> device.swaps.none { it.key() == f.key() } }.forEach { device.swaps.add(it) }
+        file.milestonesShown.filter { it !in device.milestonesShown }.forEach { device.milestonesShown.add(it) }
         device.sessions.sortBy { it.date }
         device.weights.sortBy { it.date }
         device.cardio.sortBy { it.date }
@@ -420,28 +451,35 @@ fun AppData.avg7(date: LocalDate): Double? {
     return if (vals.isEmpty()) null else vals.average()
 }
 
-/** 7-day average now minus 7 days before (positive = lost), from the latest weigh-in. */
-fun AppData.weeklyDrop(): Double? {
+/** Change of the 7-day average over the last 7 days, as % of body weight (negative = losing). */
+fun AppData.weeklyRatePct(): Double? {
     val last = weights.maxOfOrNull { it.date }?.let { LocalDate.parse(it) } ?: return null
     val now = avg7(last) ?: return null
     val before = avg7(last.minusDays(7)) ?: return null
-    return before - now
+    return (now - before) / before * 100
 }
 
-const val SPEED_LIMIT_KG = 1.0
+/** Average loss per week over the last 2 weeks, as % of body weight (positive = losing). */
+fun AppData.lossPerWeekPct2w(): Double? {
+    val last = weights.maxOfOrNull { it.date }?.let { LocalDate.parse(it) } ?: return null
+    val now = avg7(last) ?: return null
+    val before = avg7(last.minusDays(14)) ?: return null
+    return (before - now) / before * 100 / 2
+}
 
-/** Every whole kg lost since the first weigh-in (by 7-day average): (kg lost, date first reached). */
-fun AppData.milestones(): List<Pair<Int, String>> {
-    val ws = weights.sortedBy { it.date }
-    if (ws.isEmpty()) return emptyList()
-    val start = ws.first().kg
-    val out = mutableListOf<Pair<Int, String>>()
-    for (w in ws) {
-        val avg = avg7(LocalDate.parse(w.date)) ?: continue
-        val lost = Math.floor(start - avg + 1e-9).toInt()
-        while (out.size < lost) out.add((out.size + 1) to w.date)
-    }
-    return out
+const val SPEED_LIMIT_PCT = 1.0
+
+fun AppData.startWeight(): Double? = weights.minByOrNull { it.date }?.kg
+
+fun AppData.currentAvg(): Double? = weights.maxOfOrNull { it.date }?.let { avg7(LocalDate.parse(it)) }
+
+/** Whole kg values below the starting weight that the 7-day average has reached (99, 98, …). */
+fun AppData.crossedMilestones(): List<Int> {
+    val start = startWeight() ?: return emptyList()
+    val lowest = weights.mapNotNull { avg7(LocalDate.parse(it.date)) }.minOrNull() ?: return emptyList()
+    val hi = Math.ceil(start).toInt() - 1
+    val lo = Math.ceil(lowest - 1e-9).toInt()
+    return if (lo > hi) emptyList() else (hi downTo lo).toList()
 }
 
 // ---------- Waist and cardio helpers ----------
@@ -457,8 +495,8 @@ fun AppData.setWaist(date: String, cm: Double) {
 
 fun AppData.cardioOn(date: String): List<CardioEntry> = cardio.filter { it.date == date }
 
-fun AppData.logCardio(date: String, machine: String, minutes: Int, effort: String) {
-    cardio.add(CardioEntry(newId(), date, machine, minutes, effort, nowMs()))
+fun AppData.logCardio(date: String, type: String, minutes: Int, rpe: Int, km: Double?) {
+    cardio.add(CardioEntry(newId(), date, type, minutes, rpe, km, nowMs()))
     cardio.sortBy { it.date }
     if (date !in cardioDone) cardioDone.add(date)
 }
@@ -468,60 +506,141 @@ fun AppData.clearCardio(date: String) {
     cardio.removeAll { it.date == date }
 }
 
-fun CardioEntry.text(): String = "$machine · $minutes min · ${effort.lowercase(Locale.ENGLISH)}"
+fun CardioEntry.text(): String =
+    "$type · $minutes min · RPE $rpe" + (km?.let { " · ${fmtNum(it)} km" } ?: "")
 
-// ---------- Progress helpers ----------
+/** Days marked cardio done before the cardio log existed: shown as entries without minutes. */
+fun AppData.cardioWithoutDetails(): List<String> = cardioDone.filter { d -> cardio.none { it.date == d } }.sorted()
+
+// ---------- Day swaps ----------
+
+fun AppData.swapsIn(monday: LocalDate): List<Swap> = swaps.filter { it.week == monday.toString() }
+
+fun AppData.isSwapped(date: LocalDate): Boolean {
+    val i = date.dayOfWeek.value - 1
+    return swapsIn(mondayOf(date)).any { it.a == i || it.b == i }
+}
+
+fun AppData.addSwap(a: LocalDate, b: LocalDate) {
+    swaps.add(Swap(mondayOf(a).toString(), a.dayOfWeek.value - 1, b.dayOfWeek.value - 1))
+}
+
+fun AppData.undoSwap(date: LocalDate) {
+    val i = date.dayOfWeek.value - 1
+    val w = mondayOf(date).toString()
+    swaps.removeAll { it.week == w && (it.a == i || it.b == i) }
+}
+
+// ---------- Strength progress and personal bests ----------
 
 /** Epley formula: estimated one-rep max from a set. */
 fun est1rm(kg: Double, reps: Int): Double = kg * (1 + reps / 30.0)
 
-private fun SetLog.counts(): Boolean = done && (weight ?: 0.0) > 0 && (reps ?: 0) > 0
+/** A ticked set with weight and reps — the only kind that counts for progress and PBs. */
+fun SetLog.counts(): Boolean = done && (weight ?: 0.0) > 0 && (reps ?: 0) > 0
 
-/** Exercises that have at least one done set with weight and reps, A–Z. */
+fun SetLog.e1rm(): Double = est1rm(weight ?: 0.0, reps ?: 0)
+
+/** Exercises that have at least one counted set, A–Z. */
 fun AppData.loggedExercises(): List<String> =
     sessions.flatMap { s -> s.sets.filter { it.counts() }.map { it.exerciseName } }
         .distinctBy { it.lowercase(Locale.ENGLISH) }.sortedBy { it.lowercase(Locale.ENGLISH) }
 
-/** Best estimated 1RM per day for one exercise. */
-fun AppData.oneRmHistory(name: String): List<Pair<LocalDate, Double>> =
+private fun Session.setsOf(name: String): List<SetLog> =
+    sets.filter { it.counts() && it.exerciseName.equals(name, ignoreCase = true) }
+
+/** Best estimated 1RM per session for one exercise, oldest first. */
+fun AppData.oneRmPerSession(name: String): List<Pair<LocalDate, Double>> =
+    sessions.mapNotNull { s -> s.setsOf(name).maxOfOrNull { it.e1rm() }?.let { LocalDate.parse(s.date) to it } }
+        .sortedBy { it.first }
+
+/** Volume (kg × reps of ticked sets) per session for one exercise, oldest first. */
+fun AppData.volumePerSession(name: String): List<Pair<LocalDate, Double>> =
     sessions.mapNotNull { s ->
-        val best = s.sets.filter { it.counts() && it.exerciseName.equals(name, ignoreCase = true) }
-            .maxOfOrNull { est1rm(it.weight!!, it.reps!!) } ?: return@mapNotNull null
-        LocalDate.parse(s.date) to best
-    }.groupBy { it.first }.map { (d, l) -> d to l.maxOf { it.second } }.sortedBy { it.first }
+        val l = s.setsOf(name)
+        if (l.isEmpty()) null else LocalDate.parse(s.date) to l.sumOf { it.weight!! * it.reps!! }
+    }.sortedBy { it.first }
 
-fun AppData.volumeBetween(from: LocalDate, to: LocalDate): Double =
-    sessions.filter { val d = LocalDate.parse(it.date); !d.isBefore(from) && !d.isAfter(to) }
-        .sumOf { s -> s.sets.filter { it.counts() }.sumOf { it.weight!! * it.reps!! } }
+/** For each point: the mean of the points in the 7 days up to it. */
+fun rolling7(points: List<Pair<LocalDate, Double>>): List<Pair<LocalDate, Double>> =
+    points.map { (d, _) ->
+        d to points.filter { !it.first.isAfter(d) && it.first.isAfter(d.minusDays(7)) }.map { it.second }.average()
+    }
 
-fun AppData.cardioMinutesBetween(from: LocalDate, to: LocalDate): Int =
-    cardio.filter { val d = LocalDate.parse(it.date); !d.isBefore(from) && !d.isAfter(to) }.sumOf { it.minutes }
+/** Cardio minutes per day (days with logged minutes only). */
+fun AppData.cardioMinutesPerDay(): List<Pair<LocalDate, Double>> =
+    cardio.groupBy { it.date }.map { (d, l) -> LocalDate.parse(d) to l.sumOf { it.minutes }.toDouble() }
+        .sortedBy { it.first }
 
-// ---------- CSV export (one table, a "type" column says what each row is) ----------
+/** 7-day average of cardio minutes per day (total of the last 7 days ÷ 7), for every day in the range. */
+fun cardioAvg7(perDay: List<Pair<LocalDate, Double>>): List<Pair<LocalDate, Double>> {
+    if (perDay.isEmpty()) return emptyList()
+    val out = mutableListOf<Pair<LocalDate, Double>>()
+    var d = perDay.first().first
+    val end = maxOf(perDay.last().first, LocalDate.now())
+    while (!d.isAfter(end)) {
+        val day = d
+        out.add(day to perDay.filter { !it.first.isAfter(day) && it.first.isAfter(day.minusDays(7)) }.sumOf { it.second } / 7.0)
+        d = d.plusDays(1)
+    }
+    return out
+}
+
+class Record(val e1rm: Double, val heaviest: Double)
+
+/** Best e1RM and heaviest weight for an exercise from all other sessions up to this one's date. */
+fun AppData.recordBefore(name: String, s: Session): Record? {
+    val l = sessions.filter { it !== s && it.date <= s.date }.flatMap { it.setsOf(name) }
+    if (l.isEmpty()) return null
+    return Record(l.maxOf { it.e1rm() }, l.maxOf { it.weight!! })
+}
+
+fun SetLog.isPb(rec: Record?): Boolean =
+    rec != null && counts() && (e1rm() > rec.e1rm + 1e-9 || weight!! > rec.heaviest + 1e-9)
+
+/** New PBs in a session, as plain lines: "Leg Press: 1RM 120.0 → 126.7 kg". */
+fun AppData.newPbs(s: Session): List<String> {
+    val out = mutableListOf<String>()
+    for (name in s.sets.map { it.exerciseName }.distinctBy { it.lowercase(Locale.ENGLISH) }) {
+        val rec = recordBefore(name, s) ?: continue
+        val l = s.setsOf(name)
+        if (l.isEmpty()) continue
+        val best = l.maxOf { it.e1rm() }
+        val heavy = l.maxOf { it.weight!! }
+        val parts = mutableListOf<String>()
+        if (best > rec.e1rm + 1e-9) parts.add("est. 1RM ${fmtKg(rec.e1rm)} → ${fmtKg(best)} kg")
+        if (heavy > rec.heaviest + 1e-9) parts.add("heaviest ${fmtNum(rec.heaviest)} → ${fmtNum(heavy)} kg")
+        if (parts.isNotEmpty()) out.add("$name: ${parts.joinToString(", ")}")
+    }
+    return out
+}
+
+// ---------- CSV export (one file per table) ----------
 
 private fun csv(v: Any?): String {
     val s = v?.toString() ?: ""
     return if (s.any { it == ',' || it == '"' || it == '\n' }) "\"" + s.replace("\"", "\"\"") + "\"" else s
 }
 
-fun AppData.toCsv(): String {
-    val sb = StringBuilder("date,type,item,set,weight_kg,reps,done,minutes,effort,waist_cm\n")
-    fun row(vararg v: Any?) { sb.append(v.joinToString(",") { csv(it) }).append('\n') }
-    val rows = mutableListOf<Pair<String, () -> Unit>>()
-    weights.forEach { w -> rows.add(w.date to { row(w.date, "weight", "", "", fmtKg(w.kg), "", "", "", "", "") }) }
-    waists.forEach { w -> rows.add(w.date to { row(w.date, "waist", "", "", "", "", "", "", "", fmtKg(w.cm)) }) }
-    cardio.forEach { c -> rows.add(c.date to { row(c.date, "cardio", c.machine, "", "", "", "yes", c.minutes, c.effort, "") }) }
-    sessions.forEach { s ->
-        rows.add(s.date to {
-            s.sets.forEach { st ->
-                row(s.date, "set", "${s.programName}: ${st.exerciseName}", st.setIndex + 1,
-                    st.weight?.let { fmtNum(it) }, st.reps, if (st.done) "yes" else "no", "", "", "")
-            }
-        })
-    }
-    rows.sortedBy { it.first }.forEach { it.second() }
+private fun table(header: String, rows: List<List<Any?>>): String {
+    val sb = StringBuilder(header).append('\n')
+    rows.forEach { r -> sb.append(r.joinToString(",") { csv(it) }).append('\n') }
     return sb.toString()
 }
+
+/** File name → content. Photos are never part of any export. */
+fun AppData.csvFiles(): List<Pair<String, String>> = listOf(
+    "weights.csv" to table("date,kg,avg7_kg", weights.sortedBy { it.date }.map {
+        listOf(it.date, fmtKg(it.kg), avg7(LocalDate.parse(it.date))?.let { a -> fmtKg(a) })
+    }),
+    "sets.csv" to table("date,program,exercise,set,kg,reps,done", sessions.sortedBy { it.date }.flatMap { s ->
+        s.sets.map { listOf(s.date, s.programName, it.exerciseName, it.setIndex + 1, it.weight?.let { w -> fmtNum(w) }, it.reps, if (it.done) "yes" else "no") }
+    }),
+    "cardio.csv" to table("date,type,minutes,rpe,distance_km",
+        (cardio.map { listOf(it.date, it.type, it.minutes, it.rpe, it.km?.let { k -> fmtNum(k) }) } +
+            cardioWithoutDetails().map { listOf(it, "Cardio", null, null, null) }).sortedBy { it[0] as String }),
+    "waist.csv" to table("date,cm", waists.sortedBy { it.date }.map { listOf(it.date, fmtKg(it.cm)) })
+)
 
 // ---------- Workout helpers ----------
 
